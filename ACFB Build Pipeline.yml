@@ -1,77 +1,87 @@
-# Pipeline: Build & Publish ACfB (WDAC) Policies
-# One-Script-Ansatz: signiert & lädt hoch
-# Service Connection: 'AC4B' (OIDC/WIF)
-# Script: Publish-ACFBPolicy.ps1 im Repo
-# Certs: unter Certs\*.cer|*.crt
+# Pipeline: Build & Publish ACfB Policies
+# One-script approach: sign the XML and upload it
+# Service connection to Entra ID / Graph: 'AC4B' (OIDC / workload identity)
+# Script file lives in the repo: Publish-ACFBPolicy.ps1
+# Certificates must be stored under Certs\*.cer or *.crt
 
 trigger:
   branches:
     include:
-      - main
-  # … and only if files under Policies/unsigned_original change.
-  # Use a relative path and a wildcard so nested files also trigger.
+      - main                  # Run this pipeline only for changes on the 'main' branch
   paths:
     include:
-      - Policies/unsigned_original/**
+      - Policies/unsigned_original/**   # Run only if files under this folder (or subfolders) changed
 
 pool:
-  vmImage: windows-2022
+  vmImage: windows-2022       # Use Microsoft-hosted Windows agent
 
 steps:
 - checkout: self
-  clean: true
   persistCredentials: true
-  fetchDepth: 0
+  clean: true                 # Start with a clean workspace
+  fetchDepth: 0               # Full history (needed for rebase/push)
 
-# 1) Graph-Token via OIDC holen und als geheime Variable speichern
+# 1) Get a Microsoft Graph access token using OIDC (from the service connection)
+#    Then save it into a secret pipeline variable named 'secret'
 - task: AzureCLI@2
   displayName: Get Microsoft Graph access token (OIDC)
   inputs:
-    azureSubscription: AC4B
-    scriptType: pscore
+    azureSubscription: AC4B   # Name of your service connection
+    scriptType: pscore        # Use PowerShell Core inside the AzureCLI task
     scriptLocation: inlineScript
     inlineScript: |
+      # Ask Azure CLI for an access token for Microsoft Graph
       $json = az account get-access-token --resource-type ms-graph -o json
       $accessToken = ($json | ConvertFrom-Json).accessToken
+
+      # Basic check: fail early if token is empty
       if ([string]::IsNullOrWhiteSpace($accessToken)) { throw "Failed to obtain MS Graph token." }
+
+      # Store the token as a secret variable named 'secret' (masked in logs)
       Write-Host "##vso[task.setvariable variable=secret;issecret=true]$accessToken"
 
-# 2) Dein One-Script ausführen (signiert & lädt hoch)
+# 2) Run your one script that signs and uploads the policies
+#    We pass absolute paths and inject the token via -AccessToken
 - task: PowerShell@2
   displayName: Build & publish ACfB policies
   inputs:
-    targetType: filePath
-    filePath: Publish-ACFBPolicy.ps1
-    arguments: >
+    targetType: filePath                     # Run a script file from the repo
+    filePath: Publish-ACFBPolicy.ps1         # Script path (relative to repo root)
+    arguments: >                             # Script parameters (multi-line for readability)
       -PolicyRootDir "$(Build.SourcesDirectory)\Policies\unsigned_original"
       -OutputPolicyDir "$(Build.SourcesDirectory)\Policies\signed"
       -CertFolder "$(Build.SourcesDirectory)\Certs"
-      -AccessToken "$(secret)"
-    pwsh: true
-    workingDirectory: '$(Build.SourcesDirectory)'
+      -AccessToken "$(secret)"               # Use the token from step 1 (non-interactive Graph auth)
+    pwsh: true                               # Use PowerShell 7
+    workingDirectory: '$(Build.SourcesDirectory)'  # Run from repo root
 
-# 3) Signed-Output zurück ins Repo committen – nur bei Änderungen
+# 3) Commit signed output back to the repo — only if this is not a PR
+#    (So main gets the new signed files, and [skip ci] prevents infinite pipeline loops)
 - task: PowerShell@2
   displayName: Commit signed policies (only if changed)
-  condition: and(succeeded(), ne(variables['Build.Reason'], 'PullRequest'))
+  condition: and(succeeded(), ne(variables['Build.Reason'], 'PullRequest'))  # Skip for PRs
   inputs:
     targetType: inline
     pwsh: true
     script: |
       $ErrorActionPreference = 'Stop'
-      git config --global user.email "pipeline@lab1.cloud"
+
+      # Configure Git author identity for this agent session
+      git config --global user.email "pipeline@domain.tbd"
       git config --global user.name  "Pipeline ACfB Build"
+
+      # Mark the workspace as safe (avoids Git security warnings on hosted agents)
       git config --global --add safe.directory "$(Build.SourcesDirectory)"
 
+      # Pick the current source branch (fallback to main if not set)
       $branch = "$(Build.SourceBranchName)"
       if (-not $branch) { $branch = "main" }
 
+      # Make sure we are on that branch and up to date
       git checkout $branch
       git pull --rebase origin $branch
 
+      # Stage signed files for commit
       git add "Policies/signed"
-      git diff --cached --quiet
 
-      git commit -m "Update signed ACfB policy $(Build.BuildNumber) [skip ci]"
-      git push origin HEAD:$branch
-    workingDirectory: '$(Build.SourcesDirectory)'
+      # Create a commit; [skip ci] prevents triggering the pipeline again from this commit

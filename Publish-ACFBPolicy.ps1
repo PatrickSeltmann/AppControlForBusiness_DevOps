@@ -1,8 +1,110 @@
-#Requires -Version 7.0
+#Requires -Version 7.0   # Make sure we run on PowerShell 7 or newer
+
 <#
 .SYNOPSIS
-  Processes App Control for Business (ACfB) Base and Supplemental Policies from disk or git repository,
-  signs them, and uploads them to Microsoft Intune using Microsoft Graph API.
+Publishes App Control for Business (ACfB) policies to Intune:
+- Signs local policy XML files (Base_*.xml / Supplemental_*.xml) with a certificate,
+- Restores the original VersionEx after signing and compares local and remote version on it (signer tool reset it),
+- Creates or updates the matching Intune configuration policy via Microsoft Graph.
+
+.DESCRIPTION
+This script automates the full ACfB policy publishing flow. It scans a source folder for
+policy XMLs with the naming pattern Base_*.xml or Supplemental_*.xml, copies them to an output folder,
+signs them using a .cer/.crt certificate (stored in the 'certs' folder), and uploads the signed XML to Intune using the Microsoft Graph API.
+
+Key behaviors:
+- Dual auth mode:
+  • CI/CD (non-interactive): Use -AccessToken (e.g., from Azure DevOps OIDC service connection).
+  • Manual (interactive): Prompt using Microsoft.Graph.Authentication with the required scope.
+- update logic:
+  The script reads the currently deployed XML from Intune and compares versions/content:
+    • Update if local VersionEx > remote VersionEx,
+- Safe writes:
+  The script writes the signed XML to the output folder and uses that file for upload, so you
+  can audit, commit, or archive the exact payload that Intune receives.
+
+Requirements:
+- PowerShell 7+ (see #Requires -Version 7.0).
+- Microsoft.Graph PowerShell (module Microsoft.Graph.Authentication; auto-install on demand).
+- A signing certificate file (.cer or .crt) accessible on the machine/repo.
+- Intune / Graph permissions:
+  • Scope DeviceManagementConfiguration.ReadWrite.All (for manual interactive login)
+  • Or an app/workload identity with equivalent permissions and consent (for CI/CD).
+
+Folders:
+- $PolicyRootDir: unsigned XML templates (Base_*.xml / Supplemental_*.xml)
+- $OutputPolicyDir: signed XML copies (final upload payloads)
+- $CertFolder: contains .cer/.crt to sign with (first match is used)
+
+API:
+- Uses Microsoft Graph beta endpoints for ACfB configuration policies.
+- Template families:
+    Base:          endpointSecurityApplicationControl
+    Supplemental:  endpointSecurityApplicationControlSupplementalPolicy
+- The script targets the Intune setting definition “..._xml” to embed the full policy XML string.
+
+Error handling & logging:
+- The script stops on errors (ErrorActionPreference = 'Stop').
+- If Graph returns an error with a JSON body, it is printed for troubleshooting.
+- Logs source/local/remote VersionEx values to help diagnose version logic.
+
+.PARAMETER PolicyRootDir
+Path to the folder containing unsigned policy XML files (Base_*.xml / Supplemental_*.xml).
+Default: .\Policies\unsigned_original
+
+.PARAMETER OutputPolicyDir
+Path to the folder where signed policy XML copies will be written (and uploaded from).
+Default: .\Policies\signed
+
+.PARAMETER CertFolder
+Path to the folder containing .cer or .crt files used for signing.
+The first found match is used.
+Default: .\Certs
+
+.PARAMETER TenantId
+Optional tenant ID hint for interactive (manual) Connect-MgGraph.
+Ignored when -AccessToken is provided (CI/CD).
+
+.PARAMETER AccessToken
+Optional bearer token for non-interactive (CI/CD) authentication with Connect-MgGraph -AccessToken.
+If provided, the script will not prompt for interactive login.
+
+.PARAMETER DryRun
+If set, the script only prints what it would do (CREATE/UPDATE policy) without uploading to Intune.
+
+.EXAMPLE
+# Manual (interactive) run with default folders and interactive Graph login.
+pwsh ./Publish-ACFBPolicy.ps1 `
+  -PolicyRootDir .\Policies\unsigned_original `
+  -OutputPolicyDir .\Policies\signed `
+  -CertFolder .\Certs
+
+.EXAMPLE
+# Manual run for a specific tenant (interactive login).
+pwsh ./Publish-ACFBPolicy.ps1 `
+  -TenantId "00000000-0000-0000-0000-000000000000"
+
+.EXAMPLE
+# CI/CD (Azure DevOps): pass the access token obtained in a prior AzureCLI@2 step.
+pwsh ./Publish-ACFBPolicy.ps1 `
+  -PolicyRootDir "$(Build.SourcesDirectory)\Policies\unsigned_original" `
+  -OutputPolicyDir "$(Build.SourcesDirectory)\Policies\signed" `
+  -CertFolder "$(Build.SourcesDirectory)\Certs" `
+  -AccessToken "$(secret)"
+
+.EXAMPLE
+# Dry run (no upload) to see what would be created/updated.
+pwsh ./Publish-ACFBPolicy.ps1 -DryRun
+
+.NOTES
+- PowerShell 7+ is required. On Windows, run with “pwsh” (not “powershell”).
+- If your signing helper resets VersionEx, this script restores it from the unsigned source.
+- Make sure Add-SignerRule is available on the PATH (or dot-source your custom implementation).
+- If you want to commit the signed outputs back to your repo, do so after the script finishes.
+
+.LINK
+Microsoft Graph docs (Intune configuration policies):
+https://learn.microsoft.com/mem/intune/configuration/device-profile-create
 #>
 
 param (
@@ -288,3 +390,4 @@ end {
   Write-Host ""
   Write-Host "Script execution completed." -ForegroundColor DarkGray
 }
+
