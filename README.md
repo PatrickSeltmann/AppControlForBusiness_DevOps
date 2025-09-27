@@ -31,7 +31,7 @@ repo-root/
 ├─ ACFB-Build-Pipeline.yml         # Azure DevOps pipeline
 ├─ README.md                       # This file
 ├─ Certs/                          # Public certs (.cer/.crt) for signing
-│  ├─ org-code-sign.cer
+│  ├─ CodeSigningCertTest.crt
 ├─ Policies/
 │  ├─ unsigned_original/           # Source: unsigned XML policies
 │  │  ├─ Base_MyPolicy.xml
@@ -158,8 +158,3 @@ All modifications and derivative works must also be distributed under the GPLv3 
 See `LICENSE` for details.
 
 ---
-
-### What went wrong before?
-
-* You opened a code fence with ```markdown at the very top and later closed with **four** backticks ```` — Markdown treated almost everything as code.
-* In this fixed version, each code snippet opens and closes with **exactly three** backticks, and there are no stray fences.
