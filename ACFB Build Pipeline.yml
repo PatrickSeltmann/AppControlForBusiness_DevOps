@@ -1,0 +1,77 @@
+# Pipeline: Build & Publish ACfB (WDAC) Policies
+# One-Script-Ansatz: signiert & lädt hoch
+# Service Connection: 'AC4B' (OIDC/WIF)
+# Script: Publish-ACFBPolicy.ps1 im Repo
+# Certs: unter Certs\*.cer|*.crt
+
+trigger:
+  branches:
+    include:
+      - main
+  # … and only if files under Policies/unsigned_original change.
+  # Use a relative path and a wildcard so nested files also trigger.
+  paths:
+    include:
+      - Policies/unsigned_original/**
+
+pool:
+  vmImage: windows-2022
+
+steps:
+- checkout: self
+  clean: true
+  persistCredentials: true
+  fetchDepth: 0
+
+# 1) Graph-Token via OIDC holen und als geheime Variable speichern
+- task: AzureCLI@2
+  displayName: Get Microsoft Graph access token (OIDC)
+  inputs:
+    azureSubscription: AC4B
+    scriptType: pscore
+    scriptLocation: inlineScript
+    inlineScript: |
+      $json = az account get-access-token --resource-type ms-graph -o json
+      $accessToken = ($json | ConvertFrom-Json).accessToken
+      if ([string]::IsNullOrWhiteSpace($accessToken)) { throw "Failed to obtain MS Graph token." }
+      Write-Host "##vso[task.setvariable variable=secret;issecret=true]$accessToken"
+
+# 2) Dein One-Script ausführen (signiert & lädt hoch)
+- task: PowerShell@2
+  displayName: Build & publish ACfB policies
+  inputs:
+    targetType: filePath
+    filePath: Publish-ACFBPolicy.ps1
+    arguments: >
+      -PolicyRootDir "$(Build.SourcesDirectory)\Policies\unsigned_original"
+      -OutputPolicyDir "$(Build.SourcesDirectory)\Policies\signed"
+      -CertFolder "$(Build.SourcesDirectory)\Certs"
+      -AccessToken "$(secret)"
+    pwsh: true
+    workingDirectory: '$(Build.SourcesDirectory)'
+
+# 3) Signed-Output zurück ins Repo committen – nur bei Änderungen
+- task: PowerShell@2
+  displayName: Commit signed policies (only if changed)
+  condition: and(succeeded(), ne(variables['Build.Reason'], 'PullRequest'))
+  inputs:
+    targetType: inline
+    pwsh: true
+    script: |
+      $ErrorActionPreference = 'Stop'
+      git config --global user.email "pipeline@lab1.cloud"
+      git config --global user.name  "Pipeline ACfB Build"
+      git config --global --add safe.directory "$(Build.SourcesDirectory)"
+
+      $branch = "$(Build.SourceBranchName)"
+      if (-not $branch) { $branch = "main" }
+
+      git checkout $branch
+      git pull --rebase origin $branch
+
+      git add "Policies/signed"
+      git diff --cached --quiet
+
+      git commit -m "Update signed ACfB policy $(Build.BuildNumber) [skip ci]"
+      git push origin HEAD:$branch
+    workingDirectory: '$(Build.SourcesDirectory)'
